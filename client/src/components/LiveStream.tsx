@@ -65,143 +65,216 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
   
   const { toast } = useToast();
 
+  // Track reconnection attempts
+  const reconnectAttemptsRef = useRef(0);
+  const maxReconnectAttempts = 5;
+  const initialReconnectDelay = 1000; // Start with 1 second
+  const maxReconnectDelay = 30000; // Max 30 seconds
+  
   // Setup WebSocket function
   const setupWebSocket = () => {
-    // Create a WebSocket connection for signaling
+    // Determine WebSocket URL based on environment
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsURL = `${wsProtocol}//${window.location.host}/ws`;
+    // Force secure connection if in a Replit environment with HTTPS
+    const wsHost = window.location.host;
+    const wsURL = `${wsProtocol}//${wsHost}/ws`;
+    
     console.log("Connecting to WebSocket server for WebRTC signaling at:", wsURL);
     
-    // Close any existing connection
+    // Clean up any existing connection
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
       try {
+        wsRef.current.onclose = null; // Remove close handler to prevent auto-reconnect
+        wsRef.current.onerror = null; // Remove error handler
         wsRef.current.close();
       } catch (err) {
         console.warn("Error closing existing WebSocket:", err);
       }
     }
     
-    // Try to connect to WebSocket with proper error handling
     try {
+      // Create new connection
       const ws = new WebSocket(wsURL);
       wsRef.current = ws;
       
-      // Set a connection timeout to handle potential connection issues
+      // Set a connection timeout
       const connectionTimeout = setTimeout(() => {
         if (ws.readyState !== WebSocket.OPEN) {
-          console.log("WebSocket connection timeout - cleaning up");
-          // Manually trigger close handler and cleanup
-          if (ws.readyState !== WebSocket.CLOSED) {
-            ws.close();
+          console.log("WebSocket connection timeout after 8 seconds");
+          
+          // Force close and cleanup
+          try {
+            if (ws.readyState !== WebSocket.CLOSED) {
+              ws.close();
+            }
+          } catch (error) {
+            console.error("Error closing timed out WebSocket:", error);
           }
+          
+          // Handle reconnection
+          handleReconnect();
         }
-      }, 5000); // 5 second timeout
+      }, 8000); // 8 second timeout
       
-      // Clear timeout when connection succeeds
+      // Connection succeeded
       ws.addEventListener('open', () => {
+        console.log("WebSocket connection established successfully");
         clearTimeout(connectionTimeout);
-      });
-      
-      // Setup WebSocket event handlers
-      ws.onopen = () => {
-      console.log("WebSocket connection established");
-      
-      // For viewers, join the stream automatically if provided
-      if (initialStreamId && mode === "viewer") {
-        const joinMessage = {
-          type: "join-stream",
-          data: { streamId: initialStreamId }
-        };
-        ws.send(JSON.stringify(joinMessage));
-        setIsStreaming(true);
-      }
-      
-      // If we were already streaming as a host, reconnect
-      if (isStreaming && mode === "host" && streamId) {
-        ws.send(JSON.stringify({
-          type: "host-stream",
-          data: { streamId }
-        }));
-      }
-    };
-    
-    ws.onmessage = (event: MessageEvent) => {
-      try {
-        const message = JSON.parse(event.data);
-        console.log("WebSocket message received:", message.type);
+        reconnectAttemptsRef.current = 0; // Reset reconnect counter on success
         
-        switch (message.type) {
-          case "viewer-joined":
-            handleViewerJoined(message.data);
-            break;
-          case "viewer-left":
-            handleViewerLeft(message.data);
-            break;
-          case "stream-offer":
-            handleStreamOffer(message.data);
-            break;
-          case "stream-answer":
-            handleStreamAnswer(message.data);
-            break;
-          case "ice-candidate":
-            handleIceCandidate(message.data);
-            break;
-          case "viewer-count":
-            setViewerCount(message.data.count);
-            break;
-          case "chat-message":
-            handleChatMessage(message.data);
-            break;
-          case "stream-ended":
-            handleStreamEnded();
-            break;
-          case "stream-not-found":
-            handleStreamNotFound();
-            break;
-          default:
-            console.warn("Unknown message type:", message.type);
+        // For viewers, join the stream automatically if provided
+        if (initialStreamId && mode === "viewer") {
+          console.log("Automatically joining stream as viewer:", initialStreamId);
+          const joinMessage = {
+            type: "join-stream",
+            data: { streamId: initialStreamId }
+          };
+          ws.send(JSON.stringify(joinMessage));
+          setIsStreaming(true);
         }
-      } catch (error) {
-        console.error("Error processing WebSocket message:", error);
-      }
-    };
-    
-    ws.onerror = (error: Event) => {
-      console.error("WebSocket error:", error);
-      toast({
-        title: "Connection Error",
-        description: "Failed to establish connection to the signaling server. Will try to reconnect...",
-        variant: "destructive"
+        
+        // If we were already streaming as a host, reconnect
+        if (isStreaming && mode === "host" && streamId) {
+          console.log("Reconnecting as host for stream:", streamId);
+          ws.send(JSON.stringify({
+            type: "host-stream",
+            data: { streamId }
+          }));
+        }
       });
       
-      // Set a timer to try reconnecting
-      setTimeout(() => {
-        if (wsRef.current && (wsRef.current.readyState === WebSocket.CLOSED || wsRef.current.readyState === WebSocket.CLOSING)) {
-          console.log("Attempting to reconnect WebSocket...");
-          setupWebSocket();
+      // Message handler
+      ws.addEventListener('message', (event: MessageEvent) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          // Log received message type but avoid excessive logging for common messages
+          if (message.type !== "viewer-count") {
+            console.log("WebSocket message received:", message.type);
+          }
+          
+          switch (message.type) {
+            case "connection-established":
+              console.log("WebSocket connection established with server-assigned ID:", message.data.connectionId);
+              // Reset reconnection attempts counter
+              reconnectAttemptsRef.current = 0;
+              break;
+            case "viewer-joined":
+              handleViewerJoined(message.data);
+              break;
+            case "viewer-left":
+              handleViewerLeft(message.data);
+              break;
+            case "stream-offer":
+              handleStreamOffer(message.data);
+              break;
+            case "stream-answer":
+              handleStreamAnswer(message.data);
+              break;
+            case "ice-candidate":
+              handleIceCandidate(message.data);
+              break;
+            case "viewer-count":
+              setViewerCount(message.data.count);
+              break;
+            case "chat-message":
+              handleChatMessage(message.data);
+              break;
+            case "stream-ended":
+              handleStreamEnded();
+              break;
+            case "stream-not-found":
+              handleStreamNotFound();
+              break;
+            case "pong":
+              // Server responded to our ping
+              console.log("Received pong from server");
+              break;
+            default:
+              console.warn("Unknown message type:", message.type);
+          }
+        } catch (error) {
+          console.error("Error processing WebSocket message:", error);
         }
-      }, 3000);
-    };
-    
-    ws.onclose = () => {
-      console.log("WebSocket connection closed");
+      });
       
-      // Try to reconnect only if we're not ending the connection intentionally
-      if (isStreaming) {
-        setTimeout(() => {
-          console.log("Attempting to reconnect WebSocket after close...");
-          setupWebSocket();
-        }, 3000);
-      }
-    };
+      // Error handler
+      ws.addEventListener('error', (error) => {
+        console.error("WebSocket error:", error);
+        clearTimeout(connectionTimeout); // Clear timeout if error occurs
+        
+        // Only show error message if this isn't an automatic reconnect attempt
+        if (reconnectAttemptsRef.current === 0) {
+          toast({
+            title: "Connection Error",
+            description: "Failed to establish connection to the streaming server. Attempting to reconnect...",
+            variant: "destructive"
+          });
+        }
+        
+        // Let the close handler handle reconnection
+      });
+      
+      // Close handler
+      ws.addEventListener('close', (event) => {
+        console.log(`WebSocket connection closed with code ${event.code}`);
+        clearTimeout(connectionTimeout); // Clear timeout if connection closes
+        
+        // Only attempt reconnect if we're still streaming or if it's an unexpected close
+        if (isStreaming || event.code !== 1000) {
+          handleReconnect();
+        }
+      });
+      
     } catch (error) {
       console.error("Error in WebSocket setup:", error);
-      setTimeout(() => {
-        console.log("Attempting to reconnect after WebSocket setup error...");
-        setupWebSocket();
-      }, 5000);
+      handleReconnect();
     }
   };
+  
+  // Handle reconnection with exponential backoff
+  const handleReconnect = () => {
+    if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
+      console.log("Maximum reconnection attempts reached, giving up");
+      toast({
+        title: "Connection Failed",
+        description: "Unable to connect to the streaming server after multiple attempts. Please refresh the page.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // Calculate delay with exponential backoff
+    const delay = Math.min(
+      initialReconnectDelay * Math.pow(2, reconnectAttemptsRef.current),
+      maxReconnectDelay
+    );
+    
+    console.log(`Attempting to reconnect in ${delay/1000} seconds (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})...`);
+    
+    setTimeout(() => {
+      reconnectAttemptsRef.current++;
+      setupWebSocket();
+    }, delay);
+  };
+  
+  // Setup client-side ping to keep connection alive
+  useEffect(() => {
+    // Setup a ping interval to keep the connection alive from client side
+    const pingIntervalId = setInterval(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        try {
+          wsRef.current.send(JSON.stringify({ type: 'ping' }));
+        } catch (error) {
+          console.error('Error sending ping:', error);
+        }
+      }
+    }, 20000); // Send ping every 20 seconds
+    
+    return () => {
+      clearInterval(pingIntervalId);
+    };
+  }, []);
   
   // Initialize WebRTC peer connections
   useEffect(() => {
@@ -215,12 +288,20 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
       
       // Clean up peer connections
       Object.values(peersRef.current).forEach(peer => {
-        peer.destroy();
+        try {
+          peer.destroy();
+        } catch (error) {
+          console.error('Error destroying peer:', error);
+        }
       });
       
       // Close WebSocket connection
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.close();
+        try {
+          wsRef.current.close();
+        } catch (error) {
+          console.error('Error closing WebSocket:', error);
+        }
       }
     };
   }, [initialStreamId, mode, toast]);
@@ -228,73 +309,117 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
   // Handle viewer joined event
   const handleViewerJoined = ({ viewerId }: { viewerId: string }) => {
     console.log("New viewer joined:", viewerId);
-    if (mode === "host" && localStreamRef.current) {
+    if (mode === "host") {
       try {
-        // Create new peer connection for the viewer with STUN servers
-        const peer = new SimplePeer({
-          initiator: true,
-          trickle: true,
-          stream: localStreamRef.current,
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478' }
-            ]
-          }
-        });
-        
-        // Store the peer
-        peersRef.current[viewerId] = peer;
-        
-        // Handle signaling
-        peer.on("signal", (data) => {
-          console.log("Host signaling data generated for viewer:", viewerId);
+        // Check if we have a valid media stream
+        if (!localStreamRef.current) {
+          console.error("No local stream available for host");
           
-          // Different handling for ICE candidates vs SDP
-          if (data.type === "candidate") {
-            wsRef.current?.send(JSON.stringify({
-              type: "ice-candidate",
-              data: {
-                targetId: viewerId,
-                candidate: data.candidate
-              }
-            }));
-          } else {
-            wsRef.current?.send(JSON.stringify({
-              type: "stream-offer",
-              data: {
-                streamId,
-                description: data,
-                viewerId
-              }
-            }));
-          }
-        });
-        
-        // Handle disconnect
-        peer.on("close", () => {
-          console.log("Peer connection closed with viewer:", viewerId);
-          delete peersRef.current[viewerId];
-        });
-        
-        // Handle errors
-        peer.on("error", (err) => {
-          console.error("WebRTC error with viewer:", viewerId, err);
-          toast({
-            title: "Connection Error",
-            description: "Failed to establish connection with viewer. Please try again.",
-            variant: "destructive"
+          // Try to get the stream again if it's not available
+          navigator.mediaDevices.getUserMedia({
+            video: videoEnabled ? { deviceId: selectedVideoDevice ? { exact: selectedVideoDevice } : undefined } : false,
+            audio: audioEnabled ? { deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined } : false
+          }).then(stream => {
+            localStreamRef.current = stream;
+            
+            if (localVideoRef.current) {
+              localVideoRef.current.srcObject = stream;
+            }
+            
+            // Now create the peer connection with the new stream
+            createPeerForViewer(viewerId, stream);
+          }).catch(err => {
+            console.error("Failed to get media stream for viewer:", err);
+            toast({
+              title: "Media Access Error",
+              description: "Could not access camera/microphone for streaming.",
+              variant: "destructive"
+            });
           });
-          delete peersRef.current[viewerId];
-        });
+        } else {
+          // We have a stream, create the peer connection
+          createPeerForViewer(viewerId, localStreamRef.current);
+        }
       } catch (error) {
-        console.error("Error creating host peer connection:", error);
+        console.error("Error in handleViewerJoined:", error);
         toast({
           title: "Connection Error",
           description: "Failed to establish streaming connection. Please try again.",
           variant: "destructive"
         });
       }
+    }
+  };
+  
+  // Helper function to create a peer connection for a viewer
+  const createPeerForViewer = (viewerId: string, stream: MediaStream) => {
+    try {
+      console.log("Creating peer connection for viewer:", viewerId);
+      
+      // Create new peer connection for the viewer with STUN servers
+      const peer = new SimplePeer({
+        initiator: true,
+        trickle: true,
+        stream: stream,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+          ]
+        }
+      });
+      
+      // Store the peer
+      peersRef.current[viewerId] = peer;
+      
+      // Handle signaling
+      peer.on("signal", (data) => {
+        console.log("Host signaling data generated for viewer:", viewerId, data.type || "unknown type");
+        
+        // Different handling for ICE candidates vs SDP
+        if (data.type === "candidate") {
+          wsRef.current?.send(JSON.stringify({
+            type: "ice-candidate",
+            data: {
+              targetId: viewerId,
+              candidate: data.candidate
+            }
+          }));
+        } else {
+          wsRef.current?.send(JSON.stringify({
+            type: "stream-offer",
+            data: {
+              streamId,
+              description: data,
+              viewerId
+            }
+          }));
+        }
+      });
+      
+      // Handle disconnect
+      peer.on("close", () => {
+        console.log("Peer connection closed with viewer:", viewerId);
+        delete peersRef.current[viewerId];
+      });
+      
+      // Handle errors
+      peer.on("error", (err) => {
+        console.error("WebRTC error with viewer:", viewerId, err);
+        toast({
+          title: "Connection Error",
+          description: "Failed to establish connection with viewer. Please try again.",
+          variant: "destructive"
+        });
+        delete peersRef.current[viewerId];
+      });
+    } catch (error) {
+      console.error("Error creating peer for viewer:", error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to create peer connection. Please try again.",
+        variant: "destructive"
+      });
     }
   };
   
@@ -312,6 +437,8 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
     console.log("Received stream offer from host:", hostId);
     if (mode === "viewer") {
       try {
+        console.log("Creating peer connection to accept offer from host:", hostId);
+        
         // Create new peer connection to accept the offer with STUN servers
         const peer = new SimplePeer({
           initiator: false,
@@ -326,15 +453,16 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
         
         peersRef.current[hostId] = peer;
         
-        // Accept the offer
-        peer.signal(description);
+        // Log the signal being processed for debugging
+        console.log("Processing host offer signal:", description);
         
         // Send answer back to host
         peer.on("signal", (data) => {
-          console.log("Viewer signaling data generated for host:", hostId);
+          console.log("Viewer signaling data generated for host:", hostId, data.type || "unknown type");
           
           // Different handling for ICE candidates vs SDP
           if (data.type === "candidate") {
+            console.log("Sending ICE candidate to host:", hostId);
             wsRef.current?.send(JSON.stringify({
               type: "ice-candidate",
               data: {
@@ -343,6 +471,7 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
               }
             }));
           } else {
+            console.log("Sending answer to host:", hostId);
             wsRef.current?.send(JSON.stringify({
               type: "stream-answer",
               data: {
@@ -355,9 +484,18 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
         
         // When we get the remote stream
         peer.on("stream", (stream) => {
-          console.log("Received remote stream from host");
+          console.log("Received remote stream from host with tracks:", stream.getTracks().length);
+          
+          toast({
+            title: "Connected to Stream",
+            description: "You are now connected to the live stream."
+          });
+          
           if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = stream;
+            remoteVideoRef.current.play().catch(err => {
+              console.error("Error playing remote video:", err);
+            });
           }
         });
         
@@ -384,6 +522,10 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
           }
           delete peersRef.current[hostId];
         });
+        
+        // Accept the offer after setting up all event handlers
+        console.log("Accepting offer from host:", hostId);
+        peer.signal(description);
       } catch (error) {
         console.error("Error creating viewer peer connection:", error);
         toast({

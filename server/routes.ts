@@ -237,7 +237,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const audioStreamConnections = new Map<number, { broadcaster: WebSocket | null, listeners: Set<WebSocket> }>();
 
   // Create a WebSocket server for WebRTC signaling
-  const webrtcWss = new WebSocketServer({ noServer: true });
+  const webrtcWss = new WebSocketServer({ 
+    noServer: true,
+    // Increase ping timeout to handle slower connections
+    clientTracking: true,
+  });
+
+  // Add a ping-pong mechanism to keep connections alive 
+  function heartbeat(this: WebSocket & { isAlive?: boolean }) {
+    this.isAlive = true;
+  }
+  
+  // Set up a ping interval to keep connections alive
+  const pingInterval = setInterval(() => {
+    webrtcWss.clients.forEach((ws: WebSocket & { isAlive?: boolean }) => {
+      if (ws.isAlive === false) {
+        console.log('Terminating inactive WebSocket connection');
+        return ws.terminate();
+      }
+      
+      // Mark as inactive until pong response
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch (err) {
+        console.error('Error sending ping:', err);
+        ws.terminate();
+      }
+    });
+  }, 30000); // Check every 30 seconds
+  
+  // Clean up interval on server close
+  server.on('close', () => {
+    clearInterval(pingInterval);
+  });
 
   // Store active streams for WebRTC - make this global outside the connection handler
   const webrtcActiveStreams = new Map<string, { 
@@ -246,16 +279,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
     userId?: number;
     streamKey?: string;
   }>();
+
+  // Keep track of connection IDs to client WebSockets to handle reconnections
+  const connectionMap = new Map<string, WebSocket & { connectionId?: string }>();
     
-  // Set up the WebRTC WebSocket server
-  webrtcWss.on('connection', (ws: WebSocket & { connectionId?: string }) => {
-    console.log('New WebRTC signaling connection established');
+  // Set up the WebRTC WebSocket server and handle connections
+  webrtcWss.on('connection', (ws: WebSocket & { connectionId?: string, isAlive?: boolean }) => {
+    // Mark the connection as alive for the heartbeat system
+    ws.isAlive = true;
+    ws.on('pong', heartbeat);
     
     // Generate a unique ID for this connection
     const connectionId = uuidv4();
     
+    console.log('New WebRTC signaling connection established:', connectionId);
+    
     // Store the connectionId on the WebSocket object
     ws.connectionId = connectionId;
+    
+    // Store the connection in our map for future reference
+    connectionMap.set(connectionId, ws);
+    
+    // Send initial handshake confirmation to client
+    try {
+      ws.send(JSON.stringify({
+        type: 'connection-established',
+        data: { connectionId }
+      }));
+    } catch (error) {
+      console.error('Error sending connection confirmation:', error);
+    }
     
     ws.on('message', (message) => {
       try {
@@ -336,10 +389,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           case 'stream-offer':
             // Forward offer to specific viewer
             const targetViewerId = data.data.viewerId;
+            console.log(`Stream offer received from ${connectionId} (host) for viewer ${targetViewerId}`);
+            console.log(`Description type: ${data.data.description.type || 'unknown'}`);
+            
+            let offerSent = false;
             webrtcWss.clients.forEach(client => {
               // Check if this client is the target viewer we want to send to
               if (client !== ws && client.readyState === WebSocket.OPEN && 
                   (client as any).connectionId === targetViewerId) {
+                console.log(`Forwarding stream offer to viewer ${targetViewerId}`);
                 client.send(JSON.stringify({
                   type: 'stream-offer',
                   data: {
@@ -347,18 +405,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     description: data.data.description
                   }
                 }));
+                offerSent = true;
               }
             });
+            
+            if (!offerSent) {
+              console.log(`WARNING: Could not forward stream offer - viewer ${targetViewerId} not found`);
+            }
             break;
             
           case 'stream-answer':
             // Forward answer to specific host
             const hostId = data.data.hostId;
+            console.log(`Stream answer received from ${connectionId} (viewer) for host ${hostId}`);
+            console.log(`Description type: ${data.data.description.type || 'unknown'}`);
             
+            let answerSent = false;
             webrtcWss.clients.forEach(client => {
               // Only send to the specific host
               if (client !== ws && client.readyState === WebSocket.OPEN && 
                   (client as any).connectionId === hostId) {
+                console.log(`Forwarding stream answer to host ${hostId}`);
                 client.send(JSON.stringify({
                   type: 'stream-answer',
                   data: {
@@ -366,18 +433,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     description: data.data.description
                   }
                 }));
+                answerSent = true;
               }
             });
+            
+            if (!answerSent) {
+              console.log(`WARNING: Could not forward stream answer - host ${hostId} not found`);
+            }
             break;
             
           case 'ice-candidate':
             // Forward ICE candidate to the specific target
             const targetId = data.data.targetId;
+            console.log(`ICE candidate received from ${connectionId} for target ${targetId}`);
             
+            let iceCandidateSent = false;
             // Only send to the specific target
             webrtcWss.clients.forEach(client => {
               if (client !== ws && client.readyState === WebSocket.OPEN && 
                   (client as any).connectionId === targetId) {
+                console.log(`Forwarding ICE candidate to ${targetId}`);
                 client.send(JSON.stringify({
                   type: 'ice-candidate',
                   data: {
@@ -385,8 +460,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     candidate: data.data.candidate
                   }
                 }));
+                iceCandidateSent = true;
               }
             });
+            
+            if (!iceCandidateSent) {
+              console.log(`WARNING: Could not forward ICE candidate - target ${targetId} not found`);
+            }
             break;
             
           case 'chat-message':
@@ -455,6 +535,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   }));
                 }
               });
+            }
+            break;
+            
+          case 'ping':
+            // Client ping to keep connection alive, respond with pong
+            try {
+              ws.send(JSON.stringify({
+                type: 'pong',
+                timestamp: Date.now()
+              }));
+            } catch (err) {
+              console.error('Error sending pong response:', err);
             }
             break;
             
