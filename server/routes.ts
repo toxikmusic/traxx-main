@@ -374,13 +374,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
             break;
             
           case 'chat-message':
-            // Broadcast chat message to all clients
+            // Broadcast chat message to all clients with username if provided
+            const username = data.data.username || 'Anonymous';
+            const userId = data.data.userId || 0;
+            
             webrtcWss.clients.forEach(client => {
               if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify({
                   type: 'chat-message',
                   data: {
                     senderId: connectionId,
+                    userId: userId,
+                    username: username,
                     message: data.data.message,
                     timestamp: new Date().toISOString()
                   }
@@ -609,9 +614,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
     
     // Chat message
-    socket.on("chat-message", ({ streamId, message }) => {
+    socket.on("chat-message", ({ streamId, userId, username, message }) => {
       io.to(streamId).emit("chat-message", {
         senderId: socket.id,
+        userId: userId || 0,
+        username: username || 'Anonymous',
         message,
         timestamp: new Date().toISOString()
       });

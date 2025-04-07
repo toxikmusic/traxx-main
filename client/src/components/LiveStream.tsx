@@ -14,6 +14,8 @@ import { Copy, ExternalLink, Mic, MicOff, Video, VideoOff, Send, Users, Monitor,
 
 interface ChatMessage {
   senderId: string;
+  userId?: number;
+  username?: string;
   message: string;
   timestamp: string;
   isCurrentUser?: boolean;
@@ -386,9 +388,16 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
   };
   
   // Handle chat message
-  const handleChatMessage = ({ senderId, message, timestamp }: ChatMessage) => {
+  const handleChatMessage = ({ senderId, userId, username, message, timestamp }: ChatMessage) => {
     const isCurrentUser = senderId === wsRef.current?.url;
-    setChatMessages(prev => [...prev, { senderId, message, timestamp, isCurrentUser }]);
+    setChatMessages(prev => [...prev, { 
+      senderId, 
+      userId,
+      username,
+      message, 
+      timestamp, 
+      isCurrentUser 
+    }]);
     
     // Auto-scroll chat to bottom
     if (chatContainerRef.current) {
@@ -934,6 +943,8 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
       type: "chat-message",
       data: {
         streamId,
+        userId: userId,
+        username: userName || 'Anonymous',
         message: currentMessage.trim()
       }
     }));
@@ -1201,7 +1212,7 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
                         }`}
                       >
                         <div className="font-bold text-xs opacity-70">
-                          {msg.isCurrentUser ? "You" : `Anonymous (${msg.senderId.slice(0, 4)})`}
+                          {msg.isCurrentUser ? "You" : (msg.username || `Anonymous (${msg.senderId.slice(0, 4)})`)}
                         </div>
                         {msg.message}
                       </div>
@@ -1326,7 +1337,7 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
                       <div className="font-bold text-xs opacity-70">
                         {msg.isCurrentUser
                           ? "You"
-                          : `Anonymous (${msg.senderId.slice(0, 4)})`}
+                          : (msg.username || `Anonymous (${msg.senderId.slice(0, 4)})`)}
                       </div>
                       {msg.message}
                     </div>
