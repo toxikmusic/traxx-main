@@ -249,14 +249,26 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
         // Handle signaling
         peer.on("signal", (data) => {
           console.log("Host signaling data generated for viewer:", viewerId);
-          wsRef.current?.send(JSON.stringify({
-            type: "stream-offer",
-            data: {
-              streamId,
-              description: data,
-              viewerId
-            }
-          }));
+          
+          // Different handling for ICE candidates vs SDP
+          if (data.type === "candidate") {
+            wsRef.current?.send(JSON.stringify({
+              type: "ice-candidate",
+              data: {
+                targetId: viewerId,
+                candidate: data.candidate
+              }
+            }));
+          } else {
+            wsRef.current?.send(JSON.stringify({
+              type: "stream-offer",
+              data: {
+                streamId,
+                description: data,
+                viewerId
+              }
+            }));
+          }
         });
         
         // Handle disconnect
@@ -320,13 +332,25 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
         // Send answer back to host
         peer.on("signal", (data) => {
           console.log("Viewer signaling data generated for host:", hostId);
-          wsRef.current?.send(JSON.stringify({
-            type: "stream-answer",
-            data: {
-              hostId,
-              description: data
-            }
-          }));
+          
+          // Different handling for ICE candidates vs SDP
+          if (data.type === "candidate") {
+            wsRef.current?.send(JSON.stringify({
+              type: "ice-candidate",
+              data: {
+                targetId: hostId,
+                candidate: data.candidate
+              }
+            }));
+          } else {
+            wsRef.current?.send(JSON.stringify({
+              type: "stream-answer",
+              data: {
+                hostId,
+                description: data
+              }
+            }));
+          }
         });
         
         // When we get the remote stream
@@ -944,7 +968,7 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
       data: {
         streamId,
         userId: userId,
-        username: userName || 'Anonymous',
+        username: userId && userName ? userName : 'Anonymous',
         message: currentMessage.trim()
       }
     }));

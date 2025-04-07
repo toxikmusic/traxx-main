@@ -248,11 +248,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }>();
     
   // Set up the WebRTC WebSocket server
-  webrtcWss.on('connection', (ws) => {
+  webrtcWss.on('connection', (ws: WebSocket & { connectionId?: string }) => {
     console.log('New WebRTC signaling connection established');
     
     // Generate a unique ID for this connection
     const connectionId = uuidv4();
+    
+    // Store the connectionId on the WebSocket object
+    ws.connectionId = connectionId;
     
     ws.on('message', (message) => {
       try {
@@ -300,8 +303,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               stream.viewers.add(connectionId);
               
               // Notify host about new viewer
+              const streamHostId = stream.hostId;
               webrtcWss.clients.forEach(client => {
-                if (client !== ws && client.readyState === WebSocket.OPEN) {
+                if (client !== ws && client.readyState === WebSocket.OPEN && 
+                    (client as any).connectionId === streamHostId) {
                   client.send(JSON.stringify({
                     type: 'viewer-joined',
                     data: { viewerId: connectionId }
@@ -330,8 +335,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             
           case 'stream-offer':
             // Forward offer to specific viewer
+            const targetViewerId = data.data.viewerId;
             webrtcWss.clients.forEach(client => {
-              if (client !== ws && client.readyState === WebSocket.OPEN) {
+              // Check if this client is the target viewer we want to send to
+              if (client !== ws && client.readyState === WebSocket.OPEN && 
+                  (client as any).connectionId === targetViewerId) {
                 client.send(JSON.stringify({
                   type: 'stream-offer',
                   data: {
@@ -344,9 +352,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             break;
             
           case 'stream-answer':
-            // Forward answer to host
+            // Forward answer to specific host
+            const hostId = data.data.hostId;
+            
             webrtcWss.clients.forEach(client => {
-              if (client !== ws && client.readyState === WebSocket.OPEN) {
+              // Only send to the specific host
+              if (client !== ws && client.readyState === WebSocket.OPEN && 
+                  (client as any).connectionId === hostId) {
                 client.send(JSON.stringify({
                   type: 'stream-answer',
                   data: {
@@ -359,9 +371,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             break;
             
           case 'ice-candidate':
-            // Forward ICE candidate
+            // Forward ICE candidate to the specific target
+            const targetId = data.data.targetId;
+            
+            // Only send to the specific target
             webrtcWss.clients.forEach(client => {
-              if (client !== ws && client.readyState === WebSocket.OPEN) {
+              if (client !== ws && client.readyState === WebSocket.OPEN && 
+                  (client as any).connectionId === targetId) {
                 client.send(JSON.stringify({
                   type: 'ice-candidate',
                   data: {
@@ -419,8 +435,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               stream.viewers.delete(connectionId);
               
               // Notify host that a viewer has left
+              const leaveStreamHostId = stream.hostId;
               webrtcWss.clients.forEach(client => {
-                if (client !== ws && client.readyState === WebSocket.OPEN) {
+                if (client !== ws && client.readyState === WebSocket.OPEN && 
+                    (client as any).connectionId === leaveStreamHostId) {
                   client.send(JSON.stringify({
                     type: 'viewer-left',
                     data: { viewerId: connectionId }
@@ -471,8 +489,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           stream.viewers.delete(connectionId);
           
           // Notify host that a viewer has left
+          const hostConnectionId = stream.hostId;
           webrtcWss.clients.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
+            if (client !== ws && client.readyState === WebSocket.OPEN &&
+                (client as any).connectionId === hostConnectionId) {
               client.send(JSON.stringify({
                 type: 'viewer-left',
                 data: { viewerId: connectionId }
