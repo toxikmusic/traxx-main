@@ -243,33 +243,89 @@ export async function registerRoutes(app: Express): Promise<Server> {
     clientTracking: true,
   });
 
-  // Add a ping-pong mechanism to keep connections alive 
-  function heartbeat(this: WebSocket & { isAlive?: boolean }) {
+  // Improved heartbeat mechanism for better WebSocket reliability
+  function heartbeat(this: WebSocket & { isAlive?: boolean; connectionId?: string }) {
     this.isAlive = true;
+    // Log when a connection responds to pong at debug level
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`Connection ${this.connectionId} is alive`);
+    }
   }
   
-  // Set up a ping interval to keep connections alive
+  // Set up a ping interval to keep connections alive with more frequent checks
+  const connectionCheckInterval = 20000; // Check every 20 seconds
   const pingInterval = setInterval(() => {
-    webrtcWss.clients.forEach((ws: WebSocket & { isAlive?: boolean }) => {
+    let activeCount = 0;
+    let terminatedCount = 0;
+    
+    webrtcWss.clients.forEach((ws: WebSocket & { isAlive?: boolean; connectionId?: string; lastPing?: number }) => {
+      // If connection is not alive since last ping, terminate it
       if (ws.isAlive === false) {
-        console.log('Terminating inactive WebSocket connection');
-        return ws.terminate();
+        console.log(`Terminating inactive WebSocket connection: ${ws.connectionId}`);
+        try {
+          // Remove from connection map
+          if (ws.connectionId) {
+            connectionMap.delete(ws.connectionId);
+          }
+          ws.terminate();
+          terminatedCount++;
+          return;
+        } catch (err) {
+          console.error('Error terminating WebSocket:', err);
+        }
       }
       
-      // Mark as inactive until pong response
+      // Mark connection as inactive until we get a pong response
       ws.isAlive = false;
+      
+      // Record when we sent the ping
+      ws.lastPing = Date.now();
+      
       try {
-        ws.ping();
+        // Try to ping, with error handling
+        ws.ping('', false, (err) => {
+          if (err) {
+            console.error(`Ping error for ${ws.connectionId}:`, err);
+            ws.terminate();
+          }
+        });
+        activeCount++;
       } catch (err) {
-        console.error('Error sending ping:', err);
-        ws.terminate();
+        console.error(`Error sending ping to ${ws.connectionId}:`, err);
+        try {
+          ws.terminate();
+          terminatedCount++;
+        } catch (innerErr) {
+          console.error('Error terminating connection after ping failure:', innerErr);
+        }
       }
     });
-  }, 30000); // Check every 30 seconds
+    
+    // Periodically log connection counts
+    console.log(`WebSocket connections - Active: ${activeCount}, Terminated: ${terminatedCount}`);
+  }, connectionCheckInterval);
   
-  // Clean up interval on server close
+  // Also send application-level pings (not just WebSocket protocol pings)
+  const appPingInterval = setInterval(() => {
+    webrtcWss.clients.forEach((ws: WebSocket & { isAlive?: boolean; connectionId?: string }) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            type: 'server-ping',
+            timestamp: Date.now()
+          }));
+        } catch (err) {
+          console.error(`Error sending application ping to ${ws.connectionId}:`, err);
+        }
+      }
+    });
+  }, 45000); // Every 45 seconds
+  
+  // Clean up intervals on server close
   server.on('close', () => {
     clearInterval(pingInterval);
+    clearInterval(appPingInterval);
+    console.log('WebSocket intervals cleared on server close');
   });
 
   // Store active streams for WebRTC - make this global outside the connection handler

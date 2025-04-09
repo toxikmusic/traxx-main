@@ -12,7 +12,10 @@ import {
   ListPlus,
   Music,
   List,
-  Minimize2
+  Minimize2,
+  BarChart3,
+  ChevronUp,
+  ChevronDown
 } from "lucide-react";
 import { 
   Tooltip,
@@ -27,6 +30,9 @@ import {
 } from "@/components/ui/popover";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { useState } from "react";
+import AudioWaveform from "@/components/audio/AudioWaveform";
+import { useUserSettings } from "@/hooks/useUserSettings";
 
 export default function AudioPlayer() {
   const { 
@@ -54,6 +60,9 @@ export default function AudioPlayer() {
     formatTime,
     audioElement
   } = useAudioPlayer();
+  
+  const { settings } = useUserSettings();
+  const [showWaveform, setShowWaveform] = useState(false);
 
   // If no track is playing, don't render the player
   if (!currentTrack || isMinimized) return null;
@@ -190,22 +199,52 @@ export default function AudioPlayer() {
                 </Tooltip>
               </TooltipProvider>
             </div>
-            <div className="hidden sm:flex items-center">
-              <span className="text-xs text-muted-foreground mr-2 min-w-[40px] text-right">
-                {formatTime(currentTime)}
-              </span>
-              <div className="flex-1 relative">
-                <Slider
-                  value={[currentProgress]}
-                  max={100}
-                  step={1}
-                  className="cursor-pointer audio-progress-bar themed-slider"
-                  onValueChange={handleProgressChange}
-                />
+            <div className="hidden sm:flex items-center flex-col">
+              {/* Toggle waveform button */}
+              <div className="flex items-center justify-between w-full mb-1">
+                <span className="text-xs text-muted-foreground mr-2 min-w-[40px] text-right">
+                  {formatTime(currentTime)}
+                </span>
+                
+                <button
+                  className={cn(
+                    "flex items-center text-xs text-muted-foreground hover:text-primary transition-colors",
+                    showWaveform && "text-primary"
+                  )}
+                  onClick={() => setShowWaveform(!showWaveform)}
+                >
+                  <BarChart3 size={14} className="mr-1" />
+                  {showWaveform ? "Hide" : "Show"} Visualizer
+                  {showWaveform ? <ChevronDown size={14} className="ml-1" /> : <ChevronUp size={14} className="ml-1" />}
+                </button>
+                
+                <span className="text-xs text-muted-foreground ml-2 min-w-[40px]">
+                  {formatTime(duration || 0)}
+                </span>
               </div>
-              <span className="text-xs text-muted-foreground ml-2 min-w-[40px]">
-                {formatTime(duration || 0)}
-              </span>
+              
+              {/* Audio progress slider */}
+              <div className="flex-1 relative w-full">
+                {showWaveform ? (
+                  <div className="mb-2 rounded-md overflow-hidden">
+                    <AudioWaveform 
+                      audioElement={audioElement}
+                      isPlaying={isPlaying}
+                      highContrastMode={settings?.highContrastMode || false}
+                      height={80}
+                      onClick={() => setShowWaveform(false)}
+                    />
+                  </div>
+                ) : (
+                  <Slider
+                    value={[currentProgress]}
+                    max={100}
+                    step={1}
+                    className="cursor-pointer audio-progress-bar themed-slider"
+                    onValueChange={handleProgressChange}
+                  />
+                )}
+              </div>
             </div>
           </div>
           

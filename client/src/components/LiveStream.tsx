@@ -258,21 +258,108 @@ const LiveStream = ({ initialStreamId, userId, userName }: LiveStreamProps) => {
     }, delay);
   };
   
-  // Setup client-side ping to keep connection alive
+  // Setup client-side ping to keep connection alive with more robust mechanism
   useEffect(() => {
-    // Setup a ping interval to keep the connection alive from client side
-    const pingIntervalId = setInterval(() => {
+    // Use two ping mechanisms to ensure the connection stays alive
+    
+    // 1. Regular ping interval (keeps the connection active)
+    const regularPingIntervalId = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try {
-          wsRef.current.send(JSON.stringify({ type: 'ping' }));
+          wsRef.current.send(JSON.stringify({ 
+            type: 'ping',
+            timestamp: Date.now() 
+          }));
         } catch (error) {
-          console.error('Error sending ping:', error);
+          console.error('Error sending regular ping:', error);
         }
       }
     }, 20000); // Send ping every 20 seconds
     
+    // 2. Pong timeout detection (detects broken connections)
+    let pongReceivedSinceLastPing = true;
+    let lastPongTimestamp = Date.now();
+    
+    const pingPongCheckIntervalId = setInterval(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // If we haven't received a pong in 45 seconds, the connection might be dead
+        const timeSinceLastPong = Date.now() - lastPongTimestamp;
+        if (timeSinceLastPong > 45000 && !pongReceivedSinceLastPing) {
+          console.warn('No pong response received in 45 seconds, connection might be stale');
+          
+          // Force reconnect
+          try {
+            wsRef.current.close();
+            // Will trigger the close event handler which will attempt to reconnect
+          } catch (error) {
+            console.error('Error closing potentially dead connection:', error);
+            handleReconnect();
+          }
+          return;
+        }
+        
+        // Send a health check ping and reset the flag
+        try {
+          wsRef.current.send(JSON.stringify({ 
+            type: 'ping',
+            healthCheck: true,
+            timestamp: Date.now() 
+          }));
+          pongReceivedSinceLastPing = false;
+          
+          // Update listener to detect pong
+          const handleMessage = (event: MessageEvent) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'pong' || data.type === 'server-ping') {
+                pongReceivedSinceLastPing = true;
+                lastPongTimestamp = Date.now();
+                console.log('Connection health check passed: received pong from server');
+              }
+            } catch (err) {
+              // Non-JSON message, ignore
+            }
+          };
+          
+          // Add the listener temporarily and remove it after a short time
+          wsRef.current.addEventListener('message', handleMessage);
+          setTimeout(() => {
+            wsRef.current?.removeEventListener('message', handleMessage);
+          }, 5000);
+          
+        } catch (error) {
+          console.error('Error sending health check ping:', error);
+        }
+      }
+    }, 30000); // Check connection health every 30 seconds
+    
+    // Handle server-ping messages
+    const handleServerPing = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'server-ping') {
+          lastPongTimestamp = Date.now();
+          pongReceivedSinceLastPing = true;
+          
+          // Send response back
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ 
+              type: 'client-pong',
+              timestamp: Date.now() 
+            }));
+          }
+        }
+      } catch (err) {
+        // Non-JSON message, ignore
+      }
+    };
+    
+    wsRef.current?.addEventListener('message', handleServerPing);
+    
     return () => {
-      clearInterval(pingIntervalId);
+      clearInterval(regularPingIntervalId);
+      clearInterval(pingPongCheckIntervalId);
+      wsRef.current?.removeEventListener('message', handleServerPing);
     };
   }, []);
   
